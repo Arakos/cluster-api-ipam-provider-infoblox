@@ -210,9 +210,10 @@ func toDNSView(dnsView string) *string {
 }
 
 func prepareHostRecordForUpdate(hr *ibclient.HostRecord) {
-	// We clear zone and network view because Infoblox will return an error if we try to "update" them.
+	// We clear zone, network view and view because Infoblox will return an error if we try to "update" them.
 	hr.Zone = ""
 	hr.NetworkView = ""
+	hr.View = nil
 	// ipv4addrs and ipv6addrs are nil after fetching the host record, but the api requires them to be empty arrays.
 	if hr.Ipv4Addrs == nil {
 		hr.Ipv4Addrs = []ibclient.HostRecordIpv4Addr{}
