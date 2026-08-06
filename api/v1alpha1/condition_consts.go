@@ -37,4 +37,7 @@ const (
 	NetworkNotFoundReason = "NetworkNotFound"
 	// ConfigurationValidReason indicates that the configuration of the InfobloxInstance has been validated successfully.
 	ConfigurationValidReason = "ConfigurationValid"
+
+	// ClaimsPendingDeletionReason indicates that there are IPAddressClaims referencing the InfobloxIPPool thereby blocking its deletion.
+	ClaimsPendingDeletionReason = "ClaimsPendingDeletion"
 )
