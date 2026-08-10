@@ -98,8 +98,8 @@ func (r *InfobloxIPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// remove finalizer if no claims point to this pool anymore
 	if isMarkedForDeletion {
 		poolTypeRef := ipamv1.IPPoolReference{
-			APIGroup: pool.GetObjectKind().GroupVersionKind().Group,
-			Kind:     pool.GetObjectKind().GroupVersionKind().Kind,
+			APIGroup: v1alpha1.GroupVersion.Group,
+			Kind:     v1alpha1.InfobloxIPPoolKind,
 			Name:     pool.GetName(),
 		}
 		inUseClaims, err := poolutil.ListClaimsReferencingPool(ctx, r.Client, pool.GetNamespace(), poolTypeRef)

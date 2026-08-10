@@ -4,6 +4,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// InfobloxIPPoolKind is the Kind of the InfobloxIPPool resource.
+const InfobloxIPPoolKind = "InfobloxIPPool"
+
 // InfobloxIPPoolSpec defines the desired state of InfobloxIPPool.
 type InfobloxIPPoolSpec struct {
 

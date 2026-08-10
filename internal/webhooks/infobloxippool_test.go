@@ -338,8 +338,8 @@ func createIP(name string, ip string, pool *v1alpha1.InfobloxIPPool) *ipamv1.IPA
 		},
 		Spec: ipamv1.IPAddressSpec{
 			PoolRef: ipamv1.IPPoolReference{
-				APIGroup: pool.GetObjectKind().GroupVersionKind().Group,
-				Kind:     pool.GetObjectKind().GroupVersionKind().Kind,
+				APIGroup: v1alpha1.GroupVersion.Group,
+				Kind:     "InfobloxIPPool",
 				Name:     pool.GetName(),
 			},
 			Address: ip,
