@@ -28,7 +28,6 @@ import (
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/hostname"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox"
 	ipampredicates "github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/predicates"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -112,19 +111,10 @@ func (r *InfobloxProviderAdapter) ClaimHandlerFor(cl client.Client, claim *ipamv
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines;vspherevms,verbs=get;list;watch
 
 // FetchPool fetches pool from cluster.
-func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (client.Object, *ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	var err error
-
+func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, _ *ctrl.Result, err error) {
 	h.pool = &v1alpha1.InfobloxIPPool{}
 	if err = h.Client.Get(ctx, types.NamespacedName{Namespace: h.claim.Namespace, Name: h.claim.Spec.PoolRef.Name}, h.pool); err != nil {
-		if apierrors.IsNotFound(err) {
-			err := errors.New("pool could not be found")
-			logger.Error(err, "the referenced pool in the claim could not be found")
-			return nil, nil, fmt.Errorf("pool not found: %w", err)
-		}
-		return nil, nil, fmt.Errorf("failed to fetch pool: %w", err)
+		return nil, nil, err
 	}
 
 	// FetchPool's caller implementation currently reads the GroupVersionKind off the pool
