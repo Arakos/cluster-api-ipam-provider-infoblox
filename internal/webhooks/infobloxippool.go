@@ -84,8 +84,8 @@ func (webhook *InfobloxIPPool) ValidateDelete(ctx context.Context, pool *v1alpha
 	}
 
 	poolTypeRef := ipamv1.IPPoolReference{
-		APIGroup: pool.GetObjectKind().GroupVersionKind().Group,
-		Kind:     pool.GetObjectKind().GroupVersionKind().Kind,
+		APIGroup: v1alpha1.GroupVersion.Group,
+		Kind:     v1alpha1.InfobloxIPPoolKind,
 		Name:     pool.GetName(),
 	}
 
@@ -105,7 +105,9 @@ func (webhook *InfobloxIPPool) validate(newPool *v1alpha1.InfobloxIPPool) (reter
 	var allErrs field.ErrorList
 	defer func() {
 		if len(allErrs) > 0 {
-			reterr = apierrors.NewInvalid(v1alpha1.GroupVersion.WithKind(newPool.GetObjectKind().GroupVersionKind().Kind).GroupKind(), newPool.GetName(), allErrs)
+			reterr = apierrors.NewInvalid(
+				v1alpha1.GroupVersion.WithKind(v1alpha1.InfobloxIPPoolKind).GroupKind(),
+				newPool.GetName(), allErrs)
 		}
 	}()
 

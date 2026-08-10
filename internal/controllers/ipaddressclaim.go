@@ -76,7 +76,7 @@ func (r *InfobloxProviderAdapter) SetupWithManager(_ context.Context, b *ctrl.Bu
 		For(&ipamv1.IPAddressClaim{}, builder.WithPredicates(
 			ipampredicates.ClaimReferencesPoolKind(metav1.GroupKind{
 				Group: v1alpha1.GroupVersion.Group,
-				Kind:  "InfobloxIPPool",
+				Kind:  v1alpha1.InfobloxIPPoolKind,
 			}),
 		)).
 		WithOptions(controller.Options{
@@ -85,7 +85,7 @@ func (r *InfobloxProviderAdapter) SetupWithManager(_ context.Context, b *ctrl.Bu
 		Owns(&ipamv1.IPAddress{}, builder.WithPredicates(
 			ipampredicates.AddressReferencesPoolKind(metav1.GroupKind{
 				Group: v1alpha1.GroupVersion.Group,
-				Kind:  "InfobloxIPPool",
+				Kind:  v1alpha1.InfobloxIPPoolKind,
 			}),
 		))
 	return nil
@@ -126,6 +126,12 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (client.Object, *c
 		}
 		return nil, nil, fmt.Errorf("failed to fetch pool: %w", err)
 	}
+
+	// FetchPool's caller implementation currently reads the GroupVersionKind off the pool
+	// object rather than resolving it from the scheme. Different client implementations give no guarantee
+	// on whether they populate or (intentionally) discard these fields on get calls though.
+	// See: https://github.com/kubernetes-sigs/controller-runtime/pull/2943#pullrequestreview-2305262466
+	h.pool.GetObjectKind().SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(v1alpha1.InfobloxIPPoolKind))
 
 	// TODO: ensure pool is ready
 	if conditions.IsFalse(h.pool, clusterv1.ReadyCondition) {
