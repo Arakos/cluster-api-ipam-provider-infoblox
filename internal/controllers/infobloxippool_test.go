@@ -128,6 +128,7 @@ var _ = Describe("InfobloxIPPoolReconciler", func() {
 		poolMock = ibmock.NewMockClient(gomock.NewController(GinkgoT()))
 		reconciler = &InfobloxIPPoolReconciler{
 			Client:            apiClient,
+			APIReader:         apiClient,
 			Scheme:            apiClient.Scheme(),
 			OperatorNamespace: namespace,
 			GetInfobloxClientFunc: func(_, _ string, _ types.UID, _ string, _ infoblox.Config) (infoblox.Client, error) {
@@ -452,16 +453,34 @@ var _ = Describe("InfobloxIPPoolReconciler", func() {
 				})
 			})
 
-			It("should block deletion and report an error", func() {
-				_, err := reconcilePool()
+			It("should block deletion, say why, and ask to be called again", func() {
+				// Waiting for a claim to drain is a normal state during a teardown. Reporting it as
+				// an error would log it at error level and put the pool on an exponential backoff,
+				// checking it progressively less often exactly while it is being torn down.
+				res, err := reconcilePool()
 
-				Expect(err).To(MatchError(ContainSubstring("Cannot delete Pool until all IPAddresses and IPAddressClaims have been removed")))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal(ctrl.Result{RequeueAfter: PoolDeletionRetry}))
+				Expect(getPool().Finalizers).To(ContainElement(ProtectPoolFinalizer))
+
+				By("saying so on the pool, so the reason is not only visible in the logs")
+				Expect(getPool()).To(haveReadyCondition(metav1.ConditionFalse, v1alpha1.ClaimsPendingDeletionReason))
+				Expect(getPool().Status.Conditions).To(ContainElement(
+					HaveField("Message", ContainSubstring("waiting for 1 IPAddressClaim(s)"))))
+			})
+
+			It("should keep blocking deletion for as long as the claim exists", func() {
+				Consistently(func() error {
+					_, err := reconcilePool()
+					return err
+				}).WithTimeout(cacheTimeout).WithPolling(cachePolling).Should(Succeed())
+
 				Expect(getPool().Finalizers).To(ContainElement(ProtectPoolFinalizer))
 			})
 
 			It("should remove the finalizer once the claim is gone", func() {
 				_, err := reconcilePool()
-				Expect(err).To(HaveOccurred())
+				Expect(err).NotTo(HaveOccurred())
 
 				By("deleting the claim and waiting for the cache to observe that")
 				Expect(apiClient.Delete(ctx, &claim)).To(Succeed())

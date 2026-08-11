@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"time"
 
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/poolutil"
@@ -41,12 +42,19 @@ import (
 const (
 	// ProtectPoolFinalizer is used to prevent deletion of a Pool object while its addresses have not been deleted.
 	ProtectPoolFinalizer = "ipam.cluster.x-k8s.io/ProtectPool"
+
+	// PoolDeletionRetry is how often a pool that is waiting for its claims and addresses to be
+	// deleted is checked again. Nothing wakes the reconciler when the last one disappears, so this
+	// is also the floor for how long a pool lingers in Terminating afterwards.
+	PoolDeletionRetry = 10 * time.Second
 )
 
 // InfobloxIPPoolReconciler reconciles a InfobloxIPPool object.
 type InfobloxIPPoolReconciler struct {
 	Client client.Client
-	Scheme *runtime.Scheme
+	// APIReader reads straight from the API server, bypassing the client cache.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 
 	OperatorNamespace     string
 	GetInfobloxClientFunc infoblox.GetClientFunc
@@ -66,9 +74,6 @@ func (r *InfobloxIPPoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // Reconcile an InfobloxIPPool.
 func (r *InfobloxIPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.Result, reterr error) {
-	logger := log.FromContext(ctx)
-
-	// get object
 	pool := &v1alpha1.InfobloxIPPool{}
 	if err := r.Client.Get(ctx, req.NamespacedName, pool); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -95,30 +100,52 @@ func (r *InfobloxIPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, nil
 	}
 
-	// remove finalizer if no claims point to this pool anymore
 	if isMarkedForDeletion {
-		poolTypeRef := ipamv1.IPPoolReference{
-			APIGroup: v1alpha1.GroupVersion.Group,
-			Kind:     v1alpha1.InfobloxIPPoolKind,
-			Name:     pool.GetName(),
-		}
-		inUseClaims, err := poolutil.ListClaimsReferencingPool(ctx, r.Client, pool.GetNamespace(), poolTypeRef)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		for _, claim := range inUseClaims {
-			logger.Info("still found claim in use", "claim", claim.Name)
-		}
-		if len(inUseClaims) == 0 {
-			if controllerutil.RemoveFinalizer(pool, ProtectPoolFinalizer) {
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, fmt.Errorf("pool has IPAddresses or IPAddressClaims allocated. Cannot delete Pool until all IPAddresses and IPAddressClaims have been removed")
+		return r.reconcileDelete(ctx, pool)
 	}
 
 	return ctrl.Result{}, r.reconcile(ctx, pool)
+}
+
+// reconcileDelete holds a pool back for as long as claims still reference it.
+//
+// Waiting for claims to drain is a normal state during a teardown rather than a failure, so it is
+// reported as a condition and a requeue while any still exist.
+func (r *InfobloxIPPoolReconciler) reconcileDelete(ctx context.Context, pool *v1alpha1.InfobloxIPPool) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	poolTypeRef := ipamv1.IPPoolReference{
+		APIGroup: v1alpha1.GroupVersion.Group,
+		Kind:     v1alpha1.InfobloxIPPoolKind,
+		Name:     pool.GetName(),
+	}
+	inUseClaims, err := poolutil.ListClaimsReferencingPool(ctx, r.Client, pool.GetNamespace(), poolTypeRef)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(inUseClaims) == 0 {
+		// The client might be cached and the cache might be stale and we may not see all claims that reference the pool.
+		// So we double-check with a direct API call if none are found in cache.
+		inUseClaims, err = poolutil.ListClaimsReferencingPoolUnindexed(ctx, r.APIReader, pool.GetNamespace(), poolTypeRef)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to confirm that no claims reference the pool: %w", err)
+		}
+	}
+	if len(inUseClaims) > 0 {
+		message := fmt.Sprintf("waiting for %d IPAddressClaim(s) referencing this pool to be deleted", len(inUseClaims))
+		logger.Info(message)
+		conditions.Set(pool, metav1.Condition{
+			Type:    clusterv1.ReadyCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  v1alpha1.ClaimsPendingDeletionReason,
+			Message: message,
+		})
+		return ctrl.Result{RequeueAfter: PoolDeletionRetry}, nil
+	}
+
+	// Claims are gone so the pool can be removed.
+	controllerutil.RemoveFinalizer(pool, ProtectPoolFinalizer)
+	return ctrl.Result{}, nil
 }
 
 func (r *InfobloxIPPoolReconciler) reconcile(ctx context.Context, pool *v1alpha1.InfobloxIPPool) error {
