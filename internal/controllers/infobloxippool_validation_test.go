@@ -17,8 +17,6 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
@@ -26,50 +24,59 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// These specs exercise the CRD schema itself, so they only need an API server. No reconciler is
+// involved: every assertion is about what the API server accepts or rejects on create.
 var _ = Describe("InfobloxIPPool CRD validation", func() {
-	validPool := func(name string, subnets []v1alpha1.Subnet) *v1alpha1.InfobloxIPPool {
-		return &v1alpha1.InfobloxIPPool{
+	var namespace string
+
+	BeforeEach(func() {
+		namespace = createNamespace()
+	})
+
+	// createPool attempts to create a pool with the given subnets and reports the API server's
+	// verdict. The pool is removed again if it was accepted.
+	createPool := func(name string, subnets []v1alpha1.Subnet) error {
+		pool := &v1alpha1.InfobloxIPPool{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
-				Namespace: "default",
+				Namespace: namespace,
 			},
 			Spec: v1alpha1.InfobloxIPPoolSpec{
 				InstanceRef: v1alpha1.InstanceReference{Name: "test-instance"},
 				Subnets:     subnets,
 			},
 		}
+		defer func() {
+			ExpectWithOffset(1, client.IgnoreNotFound(apiClient.Delete(ctx, pool))).To(Succeed())
+		}()
+		return apiClient.Create(ctx, pool)
 	}
 
 	Context("CIDR validation", func() {
 		It("should accept a valid IPv4 CIDR", func() {
-			pool := validPool("valid-v4-cidr", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"}})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			Expect(createPool("valid-v4-cidr", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"}})).To(Succeed())
 		})
 
 		It("should accept a valid IPv6 CIDR", func() {
-			pool := validPool("valid-v6-cidr", []v1alpha1.Subnet{{CIDR: "2001:db8::/64", Gateway: "2001:db8::1"}})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			Expect(createPool("valid-v6-cidr", []v1alpha1.Subnet{{CIDR: "2001:db8::/64", Gateway: "2001:db8::1"}})).To(Succeed())
 		})
 
 		It("should reject a non-CIDR string", func() {
-			pool := validPool("invalid-cidr", []v1alpha1.Subnet{{CIDR: "not-a-cidr"}})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
+			err := createPool("invalid-cidr", []v1alpha1.Subnet{{CIDR: "not-a-cidr"}})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.subnets[0].cidr"))
 			Expect(err.Error()).To(ContainSubstring("Invalid value"))
 		})
 
 		It("should reject a CIDR without prefix", func() {
-			pool := validPool("no-prefix-cidr", []v1alpha1.Subnet{{CIDR: "10.0.0.0"}})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
+			err := createPool("no-prefix-cidr", []v1alpha1.Subnet{{CIDR: "10.0.0.0"}})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.subnets[0].cidr"))
 			Expect(err.Error()).To(ContainSubstring("Invalid value"))
 		})
 
 		It("should reject an empty CIDR", func() {
-			pool := validPool("empty-cidr", []v1alpha1.Subnet{{CIDR: ""}})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
+			err := createPool("empty-cidr", []v1alpha1.Subnet{{CIDR: ""}})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.subnets"))
 		})
@@ -77,31 +84,26 @@ var _ = Describe("InfobloxIPPool CRD validation", func() {
 
 	Context("Gateway validation", func() {
 		It("should accept a valid IPv4 gateway", func() {
-			pool := validPool("valid-v4-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"}})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			Expect(createPool("valid-v4-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"}})).To(Succeed())
 		})
 
 		It("should accept a valid IPv6 gateway", func() {
-			pool := validPool("valid-v6-gw", []v1alpha1.Subnet{{CIDR: "2001:db8::/64", Gateway: "2001:db8::1"}})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			Expect(createPool("valid-v6-gw", []v1alpha1.Subnet{{CIDR: "2001:db8::/64", Gateway: "2001:db8::1"}})).To(Succeed())
 		})
 
 		It("should accept an empty gateway", func() {
-			pool := validPool("empty-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: ""}})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			Expect(createPool("empty-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: ""}})).To(Succeed())
 		})
 
 		It("should reject a non-IP gateway", func() {
-			pool := validPool("invalid-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "not-an-ip"}})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
+			err := createPool("invalid-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "not-an-ip"}})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.subnets[0].gateway"))
 			Expect(err.Error()).To(ContainSubstring("Invalid value"))
 		})
 
 		It("should reject a gateway with CIDR notation", func() {
-			pool := validPool("cidr-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1/24"}})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
+			err := createPool("cidr-gw", []v1alpha1.Subnet{{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1/24"}})
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.subnets[0].gateway"))
 			Expect(err.Error()).To(ContainSubstring("Invalid value"))
@@ -110,26 +112,19 @@ var _ = Describe("InfobloxIPPool CRD validation", func() {
 
 	Context("Subnet uniqueness (listType=map)", func() {
 		It("should accept multiple subnets with different CIDRs", func() {
-			pool := validPool("unique-subnets", []v1alpha1.Subnet{
+			Expect(createPool("unique-subnets", []v1alpha1.Subnet{
 				{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"},
 				{CIDR: "10.0.1.0/24", Gateway: "10.0.1.1"},
-			})
-			Expect(poolCreateAndDelete(ctx, k8sClient, pool)).To(Succeed())
+			})).To(Succeed())
 		})
 
 		It("should reject duplicate subnet CIDRs", func() {
-			pool := validPool("dup-subnets", []v1alpha1.Subnet{
+			err := createPool("dup-subnets", []v1alpha1.Subnet{
 				{CIDR: "10.0.0.0/24", Gateway: "10.0.0.1"},
 				{CIDR: "10.0.0.0/24", Gateway: "10.0.0.2"},
 			})
-			err := poolCreateAndDelete(ctx, k8sClient, pool)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("Duplicate"))
 		})
 	})
 })
-
-func poolCreateAndDelete(ctx context.Context, cl client.Client, obj client.Object) error {
-	defer cl.Delete(ctx, obj) //nolint:errcheck
-	return cl.Create(ctx, obj)
-}
