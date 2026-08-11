@@ -142,6 +142,19 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 		ExpectWithOffset(1, apiClient.Status().Update(ctx, pool)).To(Succeed())
 	}
 
+	// markPoolNotReady sets a pool's Ready condition to false, which is what the pool reconciler
+	// does for a pool whose validation failed.
+	markPoolNotReady := func(pool *v1alpha1.InfobloxIPPool) {
+		pool.Status.Conditions = []metav1.Condition{{
+			Type:               clusterv1.ReadyCondition,
+			Status:             metav1.ConditionFalse,
+			Reason:             v1alpha1.NetworkNotFoundReason,
+			Message:            "could not find network",
+			LastTransitionTime: metav1.Now(),
+		}}
+		ExpectWithOffset(1, apiClient.Status().Update(ctx, pool)).To(Succeed())
+	}
+
 	// createPool creates a ready pool fixture in the spec's namespace.
 	//
 	// The Ready condition has to be set explicitly: claims are only served from pools whose Ready
@@ -486,6 +499,83 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 
 			Expect(err).NotTo(HaveOccurred())
 			expectNoAddress()
+		})
+	})
+
+	When("the referenced pool has never been reconciled", func() {
+		It("should not allocate an Address", func() {
+			// No status at all, which is what a pool looks like between being created and being
+			// validated by its own reconciler. Nothing has checked that its network view, DNS view
+			// or subnets exist, so it must not be served from.
+			Expect(apiClient.Create(ctx, &v1alpha1.InfobloxIPPool{
+				ObjectMeta: metav1.ObjectMeta{Name: poolName, Namespace: namespace},
+				Spec: v1alpha1.InfobloxIPPoolSpec{
+					InstanceRef: v1alpha1.InstanceReference{Name: instanceName},
+					Subnets:     defaultSubnets,
+					NetworkView: "default",
+				},
+			})).To(Succeed())
+
+			claim := newClaim(claimName, namespace, v1alpha1.InfobloxIPPoolKind, poolName)
+			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
+
+			_, err := reconcileAllocatedClaim(claimName)
+
+			Expect(err).To(MatchError(ContainSubstring("pool not ready")))
+			expectNoAddress()
+			Expect(Object(&claim)()).To(HaveField("Status.Conditions", ContainElement(And(
+				HaveField("Type", BeEquivalentTo(clusterv1.ReadyCondition)),
+				HaveField("Status", BeEquivalentTo(metav1.ConditionFalse)),
+				HaveField("Reason", BeEquivalentTo(v1alpha1.PoolNotReadyReason)),
+			))))
+		})
+	})
+
+	When("the referenced pool is no longer ready", func() {
+		// Readiness gates allocation, not release. A pool that went not ready for, say, a network
+		// that disappeared would otherwise make every claim against it undeletable, and with it
+		// every Machine and Cluster holding one.
+		It("should still release the address and delete the claim", func() {
+			expectAllocationSucceeds("10.0.0.2")
+			expectReleaseSucceeds()
+			pool := createPool()
+			claim := newClaim(claimName, namespace, v1alpha1.InfobloxIPPoolKind, poolName)
+			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
+			_, err := reconcileAllocatedClaim(claimName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("failing the pool after the address was allocated")
+			Expect(apiClient.Get(ctx, client.ObjectKeyFromObject(pool), pool)).To(Succeed())
+			markPoolNotReady(pool)
+
+			By("deleting the claim")
+			Expect(apiClient.Delete(ctx, &claim)).To(Succeed())
+
+			_, err = reconcileClaim(claimName)
+
+			Expect(err).NotTo(HaveOccurred())
+			err = apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), &ipamv1.IPAddressClaim{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the claim to be gone, got %v", err)
+			expectNoAddress()
+		})
+	})
+
+	When("the pool is deleted before the claim", func() {
+		var claim ipamv1.IPAddressClaim
+
+		BeforeEach(func() {
+			expectAllocationSucceeds("10.0.0.2")
+			pool := createPool()
+			claim = newClaim(claimName, namespace, v1alpha1.InfobloxIPPoolKind, poolName)
+			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
+			_, err := reconcileAllocatedClaim(claimName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the pool out from under the claim")
+			Expect(apiClient.Delete(ctx, pool)).To(Succeed())
+
+			By("deleting the claim")
+			Expect(apiClient.Delete(ctx, &claim)).To(Succeed())
 		})
 	})
 

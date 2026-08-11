@@ -135,8 +135,13 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, 
 	// See: https://github.com/kubernetes-sigs/controller-runtime/pull/2943#pullrequestreview-2305262466
 	h.pool.GetObjectKind().SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(v1alpha1.InfobloxIPPoolKind))
 
-	// TODO: ensure pool is ready
-	if conditions.IsFalse(h.pool, clusterv1.ReadyCondition) {
+	// Readiness describes whether the pool can hand out new addresses. It says nothing about
+	// whether an address already taken from it can be released. So the gate applies to allocation only.
+	//
+	// An absent condition counts as not ready: a pool that has never been reconciled has not been
+	// validated against Infoblox, and its network view, DNS view and subnets may not exist.
+	if h.claim.GetDeletionTimestamp().IsZero() &&
+		!conditions.IsTrue(h.pool, clusterv1.ReadyCondition) {
 		conditions.Set(h.claim, metav1.Condition{
 			Type:    clusterv1.ReadyCondition,
 			Status:  metav1.ConditionFalse,
