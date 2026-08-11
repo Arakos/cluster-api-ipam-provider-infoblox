@@ -29,6 +29,9 @@ const (
 	// ReleaseFailedReason indicates that the IP address held by a claim could not be released back to Infoblox.
 	ReleaseFailedReason = "ReleaseFailed"
 
+	// ClaimsPendingDeletionReason indicates that IPAddressClaims still reference the InfobloxIPPool, blocking its deletion.
+	ClaimsPendingDeletionReason = "ClaimsPendingDeletion"
+
 	// AuthenticationFailedReason indicates that the credentials provided to Infoblox were invalid.
 	AuthenticationFailedReason = "AuthenticationFailed"
 	// InfobloxCheckFailedReason indicates that a check against the Infoblox instance could not be

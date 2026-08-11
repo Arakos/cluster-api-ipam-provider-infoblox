@@ -53,7 +53,14 @@ import (
 const (
 	// managerTimeout bounds how long a spec waits for a controller to act on an object.
 	managerTimeout = 20 * time.Second
-	managerPolling = 50 * time.Millisecond
+
+	// poolDeletionTimeout bounds the wait for a pool to disappear once nothing references it any
+	// more. Nothing wakes the pool reconciler when the last claim goes, so this wait is dominated by
+	// the requeue cadence rather than by how fast the controller works - hence the extra headroom,
+	// which is expressed in terms of PoolDeletionRetry so that changing it cannot turn this into a
+	// flake.
+	poolDeletionTimeout = managerTimeout + PoolDeletionRetry
+	managerPolling      = 50 * time.Millisecond
 	// quietPeriod is how long a spec observes that nothing happens when nothing should.
 	quietPeriod = 2 * time.Second
 )
@@ -159,6 +166,7 @@ var _ = Describe("controllers running under a manager", Ordered, ContinueOnFailu
 
 		Expect((&InfobloxIPPoolReconciler{
 			Client:                mgr.GetClient(),
+			APIReader:             mgr.GetAPIReader(),
 			Scheme:                mgr.GetScheme(),
 			OperatorNamespace:     namespace,
 			GetInfobloxClientFunc: getInfobloxClient,
@@ -256,7 +264,7 @@ var _ = Describe("controllers running under a manager", Ordered, ContinueOnFailu
 			Eventually(func(g Gomega) {
 				err := apiClient.Get(ctx, poolKey, &v1alpha1.InfobloxIPPool{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the pool to be gone, got %v", err)
-			}).WithTimeout(managerTimeout).WithPolling(managerPolling).Should(Succeed())
+			}).WithTimeout(poolDeletionTimeout).WithPolling(managerPolling).Should(Succeed())
 		})
 	})
 

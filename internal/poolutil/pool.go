@@ -39,13 +39,33 @@ func ListAddressesInUse(ctx context.Context, c client.Client, namespace string, 
 }
 
 // ListClaimsReferencingPool fetches all IPAddressClaims belonging to the specified pool.
-func ListClaimsReferencingPool(ctx context.Context, c client.Client, namespace string, poolRef ipamv1.IPPoolReference) ([]ipamv1.IPAddressClaim, error) {
+// Note: requires `index.ipAddressClaimByCombinedPoolRef` to be set up, so the reader has to be one that is backed by a cache.
+func ListClaimsReferencingPool(ctx context.Context, r client.Reader, namespace string, poolRef ipamv1.IPPoolReference) ([]ipamv1.IPAddressClaim, error) {
 	addresses := &ipamv1.IPAddressClaimList{}
-	err := c.List(ctx, addresses,
+	err := r.List(ctx, addresses,
 		client.MatchingFields{
 			index.IPAddressClaimPoolRefCombinedField: index.IPPoolRefValue(poolRef),
 		},
 		client.InNamespace(namespace),
 	)
 	return addresses.Items, err
+}
+
+// ListClaimsReferencingPoolUnindexed fetches all IPAddressClaims belonging to the specified pool
+// without going through the field index, so that it can be used with a reader that talks to the API
+// server directly.
+func ListClaimsReferencingPoolUnindexed(ctx context.Context, r client.Reader, namespace string, poolRef ipamv1.IPPoolReference) ([]ipamv1.IPAddressClaim, error) {
+	claims := &ipamv1.IPAddressClaimList{}
+	if err := r.List(ctx, claims, client.InNamespace(namespace)); err != nil {
+		return nil, err
+	}
+
+	wanted := index.IPPoolRefValue(poolRef)
+	referencing := make([]ipamv1.IPAddressClaim, 0, len(claims.Items))
+	for _, claim := range claims.Items {
+		if index.IPPoolRefValue(claim.Spec.PoolRef) == wanted {
+			referencing = append(referencing, claim)
+		}
+	}
+	return referencing, nil
 }

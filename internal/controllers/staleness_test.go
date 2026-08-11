@@ -86,6 +86,25 @@ func staleReads(stale client.Object, n int) client.Client {
 	})
 }
 
+// staleEmptyClaimList makes the first n IPAddressClaim list calls come back empty, modelling an
+// informer that has not observed a claim which already exists in the API server. Every other read
+// falls through.
+func staleEmptyClaimList(n int) client.Client {
+	base, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme.Scheme})
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+
+	var served atomic.Int64
+
+	return interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*ipamv1.IPAddressClaimList); ok && served.Add(1) <= int64(n) {
+				return nil
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+}
+
 var _ = Describe("reconciling from a stale read", func() {
 	const (
 		poolName   = "stale-pool"
@@ -140,6 +159,7 @@ var _ = Describe("reconciling from a stale read", func() {
 	newPoolReconciler := func(c client.Client) *InfobloxIPPoolReconciler {
 		return &InfobloxIPPoolReconciler{
 			Client:            c,
+			APIReader:         apiClient,
 			Scheme:            apiClient.Scheme(),
 			OperatorNamespace: namespace,
 			GetInfobloxClientFunc: func(_, _ string, _ types.UID, _ string, _ infoblox.Config) (infoblox.Client, error) {
@@ -264,6 +284,34 @@ var _ = Describe("reconciling from a stale read", func() {
 			Expect(apiClient.List(ctx, addresses, client.InNamespace(namespace))).To(Succeed())
 			Expect(addresses.Items).To(HaveLen(1), "a stale read must not produce a second address")
 			Expect(addresses.Items[0].Spec.Address).To(Equal("10.0.0.2"))
+		})
+	})
+
+	When("the informer has not yet observed a claim against a pool being deleted", func() {
+		// The gate that protects a pool from being deleted while claims still reference it reads
+		// through the cache, so an empty result means "the cache has not told me about any claims".
+		// Acting on that is not reversible: the pool disappears, and the reservation the claim holds
+		// in Infoblox is left with nothing that knows how to release it. A pool is most likely to be
+		// deleted during a teardown that is also creating and destroying claims, which is exactly
+		// when the informer is behind.
+		It("should not release the pool", func() {
+			pool := createReadyPool()
+
+			claim := newClaim(claimName, namespace, v1alpha1.InfobloxIPPoolKind, poolName)
+			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
+
+			By("deleting the pool")
+			Expect(apiClient.Delete(ctx, pool)).To(Succeed())
+
+			res, err := newPoolReconciler(staleEmptyClaimList(1)).Reconcile(ctx, ctrl.Request{NamespacedName: poolKey})
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(ctrl.Result{RequeueAfter: PoolDeletionRetry}))
+
+			By("keeping the pool alive on its finalizer")
+			kept := &v1alpha1.InfobloxIPPool{}
+			Expect(apiClient.Get(ctx, poolKey, kept)).To(Succeed())
+			Expect(kept.Finalizers).To(ContainElement(ProtectPoolFinalizer))
 		})
 	})
 })

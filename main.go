@@ -180,6 +180,7 @@ func main() {
 	}
 	if err = (&controllers.InfobloxIPPoolReconciler{
 		Client:                mgr.GetClient(),
+		APIReader:             mgr.GetAPIReader(),
 		Scheme:                mgr.GetScheme(),
 		GetInfobloxClientFunc: infobloxClientCache.Get,
 		OperatorNamespace:     podNamespace,
