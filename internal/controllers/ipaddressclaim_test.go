@@ -114,6 +114,15 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 		ExpectWithOffset(1, addresses.Items).To(BeEmpty())
 	}
 
+	// stripAllocationAnnotations removes the annotations the reconciler records on an IPAddress,
+	// reproducing an address that was allocated before they were introduced.
+	stripAllocationAnnotations := func() {
+		address := &ipamv1.IPAddress{}
+		ExpectWithOffset(1, apiClient.Get(ctx, client.ObjectKey{Name: claimName, Namespace: namespace}, address)).To(Succeed())
+		address.Annotations = nil
+		ExpectWithOffset(1, apiClient.Update(ctx, address)).To(Succeed())
+	}
+
 	// expectAllocationSucceeds makes the Infoblox mock hand out the given address, and asserts that
 	// the reconciler asks for one.
 	expectAllocationSucceeds := func(address string) {
@@ -205,6 +214,11 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 				Namespace:       namespace,
 				Finalizers:      []string{ipamutil.ProtectAddressFinalizer},
 				OwnerReferences: ownerRefs,
+				Annotations: map[string]string{
+					infobloxInstanceAnnotation: instanceName,
+					networkViewAnnotation:      "default",
+					dnsViewAnnotation:          "default",
+				},
 			},
 			Spec: ipamv1.IPAddressSpec{
 				ClaimRef: ipamv1.IPAddressClaimReference{Name: name},
@@ -577,6 +591,93 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 			By("deleting the claim")
 			Expect(apiClient.Delete(ctx, &claim)).To(Succeed())
 		})
+
+		// Releasing goes by what the IPAddress records - the instance, the views, and the address
+		// with its prefix - so a pool that is gone, or whose subnets have been edited since the
+		// allocation, does not stand in the way of handing the reservation back.
+		It("should still release the address and delete the claim", func() {
+			expectReleaseSucceeds()
+
+			_, err := reconcileClaim(claimName)
+
+			Expect(err).NotTo(HaveOccurred())
+			err = apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), &ipamv1.IPAddressClaim{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the claim to be gone, got %v", err)
+			expectNoAddress()
+		})
+
+		// Addresses allocated by an earlier version of this provider carry no annotations. Without
+		// them, and without the pool, nothing says which Infoblox instance and view hold the
+		// reservation. Releasing against a guess would be worse than not releasing at all, so the
+		// claim is kept instead - which is recoverable, as the next spec shows.
+		It("should refuse to release an address allocated before the annotations existed", func() {
+			// Pinned at zero: no guessed release may reach Infoblox.
+			infobloxMock.EXPECT().ReleaseAddress(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+			stripAllocationAnnotations()
+
+			_, err := reconcileClaim(claimName)
+
+			Expect(err).To(MatchError(ContainSubstring("cannot determine the Infoblox views")))
+
+			keptClaim := &ipamv1.IPAddressClaim{}
+			Expect(apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), keptClaim)).To(Succeed())
+			Expect(keptClaim.Finalizers).To(ContainElement(ipamutil.ReleaseAddressFinalizer))
+
+			By("saying so on the claim, so the stuck state is not only visible in the logs")
+			Expect(keptClaim.Status.Conditions).To(ContainElement(And(
+				HaveField("Type", BeEquivalentTo(clusterv1.ReadyCondition)),
+				HaveField("Status", BeEquivalentTo(metav1.ConditionFalse)),
+				HaveField("Reason", BeEquivalentTo(v1alpha1.ReleaseFailedReason)),
+				HaveField("Message", ContainSubstring("Restore it to let deletion proceed")),
+			)))
+		})
+
+		It("should release such an address and delete the claim once the pool is restored", func() {
+			expectReleaseSucceeds()
+			stripAllocationAnnotations()
+
+			_, err := reconcileClaim(claimName)
+			Expect(err).To(HaveOccurred())
+
+			By("restoring the pool")
+			createPool()
+
+			_, err = reconcileClaim(claimName)
+
+			Expect(err).NotTo(HaveOccurred())
+			err = apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), &ipamv1.IPAddressClaim{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the claim to be gone, got %v", err)
+			expectNoAddress()
+		})
+	})
+
+	// The Claim to IPAddress match is done by resource names as is done upstream, not by any status refs or similar.
+	When("the claim status does not name the allocated address", func() {
+		It("should still release the address and delete the claim", func() {
+			expectAllocationSucceeds("10.0.0.2")
+			expectReleaseSucceeds()
+			createPool()
+			claim := newClaim(claimName, namespace, v1alpha1.InfobloxIPPoolKind, poolName)
+			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
+			_, err := reconcileAllocatedClaim(claimName)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("dropping the address reference from the claim status")
+			Expect(apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), &claim)).To(Succeed())
+			Expect(claim.Status.AddressRef.Name).NotTo(BeEmpty(), "the reconciler should have recorded the address")
+			claim.Status.AddressRef = ipamv1.IPAddressReference{}
+			Expect(apiClient.Status().Update(ctx, &claim)).To(Succeed())
+
+			By("deleting the claim")
+			Expect(apiClient.Delete(ctx, &claim)).To(Succeed())
+
+			_, err = reconcileClaim(claimName)
+
+			Expect(err).NotTo(HaveOccurred())
+			err = apiClient.Get(ctx, client.ObjectKeyFromObject(&claim), &ipamv1.IPAddressClaim{})
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the claim to be gone, got %v", err)
+			expectNoAddress()
+		})
 	})
 
 	When("the pool is paused", func() {
@@ -623,14 +724,16 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 		})
 
 		It("should prevent deletion of claims", func() {
-			expectReleaseSucceeds()
+			// The pool is paused before the claim is first reconciled, so the claim never receives
+			// an address. Nothing was reserved, so nothing is released: pinned at zero.
+			infobloxMock.EXPECT().ReleaseAddress(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+
 			claim := newClaim(claimName, namespace, "InfobloxIPPool", poolName)
 			Expect(apiClient.Create(ctx, &claim)).To(Succeed())
 			_, err := reconcileAllocatedClaim(claimName)
 			Expect(err).NotTo(HaveOccurred())
 
-			// The pool is paused before the claim is first reconciled, so the claim never receives
-			// an address. What is under test here is the finalizer gate, not the release itself.
+			// What is under test here is the finalizer gate, not the release itself.
 			By("noting the claim never got an address, because the pool was paused throughout")
 			expectNoAddress()
 

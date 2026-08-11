@@ -26,6 +26,8 @@ const (
 	AddressAllocatedReason = "AddressAllocated"
 	// AllocationFailedReason indicates that the allocation of an IP address from the InfobloxIPPool has failed.
 	AllocationFailedReason = "AllocationFailed"
+	// ReleaseFailedReason indicates that the IP address held by a claim could not be released back to Infoblox.
+	ReleaseFailedReason = "ReleaseFailed"
 
 	// AuthenticationFailedReason indicates that the credentials provided to Infoblox were invalid.
 	AuthenticationFailedReason = "AuthenticationFailed"

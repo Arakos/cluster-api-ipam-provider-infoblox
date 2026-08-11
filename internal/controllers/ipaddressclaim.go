@@ -23,11 +23,11 @@ import (
 	"net/netip"
 	"strings"
 
-	ibclient "github.com/infobloxopen/infoblox-go-client/v2"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/hostname"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox"
 	ipampredicates "github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/predicates"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -42,7 +42,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-const hostnameAnnotation = "ipam.cluster.x-k8s.io/hostname"
+const (
+	hostnameAnnotation         = "ipam.cluster.x-k8s.io/hostname"
+	infobloxInstanceAnnotation = "ipam.cluster.x-k8s.io/infoblox-instance"
+	networkViewAnnotation      = "ipam.cluster.x-k8s.io/network-view"
+	dnsViewAnnotation          = "ipam.cluster.x-k8s.io/dns-view"
+)
 
 // GetInfobloxClientForInstanceFn resolves the Infoblox client for the instance a pool refers to.
 type GetInfobloxClientForInstanceFn func(ctx context.Context, c client.Reader, instanceName, operatorNamespace string, getClient infoblox.GetClientFunc) (infoblox.Client, error)
@@ -150,29 +155,34 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, 
 		})
 		return h.pool, nil, fmt.Errorf("pool not ready")
 	}
+	return h.pool, nil, h.ensureIBClient(ctx, h.pool.Spec.InstanceRef.Name)
+}
 
-	h.ibclient, err = h.getInfobloxClientForInstance(ctx, h.Client, h.pool.Spec.InstanceRef.Name, h.operatorNamespace, h.getInfobloxClientFunc)
-	if err != nil {
-		return h.pool, nil, fmt.Errorf("failed to get infoblox client: %w", err)
+func (h *InfobloxClaimHandler) ensureIBClient(ctx context.Context, instanceName string) (err error) {
+	if h.ibclient != nil {
+		return nil
 	}
-
-	return h.pool, nil, nil
+	if h.ibclient, err = h.getInfobloxClientForInstance(ctx, h.Client, instanceName, h.operatorNamespace, h.getInfobloxClientFunc); err != nil {
+		return fmt.Errorf("failed to create Infoblox client for instance %q: %w", instanceName, err)
+	}
+	return nil
 }
 
 // EnsureAddress ensures address.
 func (h *InfobloxClaimHandler) EnsureAddress(ctx context.Context, address *ipamv1.IPAddress) (*ctrl.Result, error) {
-	var err error
-
-	logger := log.FromContext(ctx)
-
 	hostName, err := h.ensureHostname(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	logger = logger.WithValues("hostname", hostName)
+	err = h.ensureIBClient(ctx, h.pool.Spec.InstanceRef.Name)
+	if err != nil {
+		return nil, err
+	}
 
 	var errs []error
+	dnsView := determineDNSView(h.pool.Spec.DNSView, h.ibclient.GetHostConfig().DefaultDNSView, h.pool.Spec.NetworkView)
+	logger := log.FromContext(ctx).WithValues("hostname", hostName)
 	for _, sub := range h.pool.Spec.Subnets {
 		subnet, err := netip.ParsePrefix(sub.CIDR)
 		if err != nil {
@@ -181,7 +191,6 @@ func (h *InfobloxClaimHandler) EnsureAddress(ctx context.Context, address *ipamv
 			continue
 		}
 
-		dnsView := determineDNSView(h.pool.Spec.DNSView, h.ibclient.GetHostConfig().DefaultDNSView, h.pool.Spec.NetworkView)
 		allocatedAddr, err := h.ibclient.GetOrAllocateAddress(h.pool.Spec.NetworkView, dnsView, subnet, hostName, h.pool.Spec.DNSZone, logger)
 		if err != nil {
 			errs = append(errs, err)
@@ -191,6 +200,17 @@ func (h *InfobloxClaimHandler) EnsureAddress(ctx context.Context, address *ipamv
 		address.Spec.Address = allocatedAddr.String()
 		address.Spec.Prefix = ptr.To(int32(subnet.Bits())) //nolint:gosec // subnet prefix bits are always 0-128
 		address.Spec.Gateway = sub.Gateway
+
+		// Note where in Infoblox this reservation lives, so that releasing it does not require the pool.
+		// This is kept on the object for the same reason the hostname is cached on
+		// the claim: by the time the address is released, the pool is not guaranteed to still
+		// cotain this allocation in its subnets list, or even to still exist.
+		if address.Annotations == nil {
+			address.Annotations = map[string]string{}
+		}
+		address.Annotations[infobloxInstanceAnnotation] = h.pool.Spec.InstanceRef.Name
+		address.Annotations[networkViewAnnotation] = h.pool.Spec.NetworkView
+		address.Annotations[dnsViewAnnotation] = dnsView
 
 		conditions.Set(h.claim, metav1.Condition{
 			Type:   clusterv1.ReadyCondition,
@@ -217,44 +237,131 @@ func (h *InfobloxClaimHandler) EnsureAddress(ctx context.Context, address *ipamv
 	return nil, err
 }
 
-// ReleaseAddress releases address.
+// ReleaseAddress releases the address the claim holds back to Infoblox.
+//
+// What has to be released is described by the IPAddress resource belonging to the claim.
 func (h *InfobloxClaimHandler) ReleaseAddress(ctx context.Context) (*ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	address, err := h.allocatedAddress(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if address == nil {
+		// Nothing was ever allocated for this claim, or it has already been released and the
+		// IPAddress removed. Either way there is no reservation left to leak.
+		logger.Info("Claim holds no address, nothing to release")
+		return nil, nil
+	}
+
+	subnet, err := allocatedSubnet(address)
+	if err != nil {
+		return nil, h.releaseFailed(err)
+	}
+
+	instanceName, networkView, dnsView, err := h.releaseCoordinates(address)
+	if err != nil {
+		return nil, h.releaseFailed(err)
+	}
+
 	hostName, err := h.getHostname(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get hostname: %w", err)
+		return nil, h.releaseFailed(fmt.Errorf("failed to get hostname: %w", err))
 	}
 
-	logger = logger.WithValues("hostname", hostName)
+	logger = logger.WithValues(
+		"instance", instanceName,
+		"address", address.Spec.Address,
+		"networkView", networkView,
+		"dnsView", dnsView,
+		"subnet", subnet,
+		"hostname", hostName,
+	)
 
-	if len(h.pool.Spec.Subnets) == 0 || h.pool == nil {
-		return nil, fmt.Errorf("no subnets found in pool or pool not found")
+	err = h.ensureIBClient(ctx, instanceName)
+	if err != nil {
+		return nil, err
 	}
 
-	var subnet netip.Prefix
-	for _, sub := range h.pool.Spec.Subnets {
-		subnet, err = netip.ParsePrefix(sub.CIDR)
-		if err != nil {
-			logger.Error(err, "failed to parse subnet", "subnet", sub)
-			// We won't set a condition here since this should be caught by validation
-			continue
-		}
-
-		dnsView := determineDNSView(h.pool.Spec.DNSView, h.ibclient.GetHostConfig().DefaultDNSView, h.pool.Spec.NetworkView)
-		err = h.ibclient.ReleaseAddress(h.pool.Spec.NetworkView, dnsView, subnet, hostName, logger)
-		if err != nil {
-			// since ibclient.NotFoundError has a pointer receiver on it's Error() method, we can't use errors.As() here.
-			if _, ok := err.(*ibclient.NotFoundError); !ok {
-				logger.Error(err, "failed to release address for host", "hostname", hostName)
-			}
-			logger.Info("did not find address for host", "hostname", hostName, "error", err)
-		} else {
-			logger.Info("released address for host", "hostname", hostName)
-		}
+	if err := h.ibclient.ReleaseAddress(networkView, dnsView, subnet, hostName, logger); err != nil {
+		return nil, h.releaseFailed(fmt.Errorf("failed to release address %q: %w", address.Spec.Address, err))
 	}
 
+	logger.Info("Successfully released address")
 	return nil, nil
+}
+
+// allocatedAddress returns the IPAddress belonging to the claim, or nil if there is none.
+//
+// The address is looked up by the claim's own name rather than through status.addressRef. Upstream
+// derives the name of an IPAddress from its claim and fetches it the same way when deleting, and
+// unlike the status field - which is written by a patch that trails the creation of the address -
+// the name cannot go stale. A status that has not caught up would otherwise read as "nothing was
+// ever allocated" and let the claim go while its reservation stays behind in Infoblox.
+func (h *InfobloxClaimHandler) allocatedAddress(ctx context.Context) (*ipamv1.IPAddress, error) {
+	address := &ipamv1.IPAddress{}
+	key := types.NamespacedName{Namespace: h.claim.Namespace, Name: h.claim.Name}
+	if err := h.Client.Get(ctx, key, address); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to fetch the address of the claim: %w", err)
+	}
+	return address, nil
+}
+
+// allocatedSubnet reconstructs the subnet an address was allocated from. Looking a host record up
+// by hostname finds all of its addresses, and the subnet is what selects the one to drop, so it has
+// to describe what was allocated rather than what the pool currently offers.
+func allocatedSubnet(address *ipamv1.IPAddress) (netip.Prefix, error) {
+	addr, err := netip.ParseAddr(address.Spec.Address)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("address %q is not an IP address: %w", address.Spec.Address, err)
+	}
+	if address.Spec.Prefix == nil {
+		return netip.Prefix{}, fmt.Errorf("address %q has no prefix length recorded", address.Spec.Address)
+	}
+	prefix := netip.PrefixFrom(addr, int(*address.Spec.Prefix)).Masked()
+	if !prefix.IsValid() {
+		return netip.Prefix{}, fmt.Errorf("address %q with prefix length %d does not form a valid subnet", address.Spec.Address, *address.Spec.Prefix)
+	}
+	return prefix, nil
+}
+
+// releaseCoordinates returns the Infoblox instance, network view and DNS view to release against,
+// as recorded on the IPAddress when it was allocated.
+func (h *InfobloxClaimHandler) releaseCoordinates(address *ipamv1.IPAddress) (instanceName, networkView, dnsView string, err error) {
+	instanceName = address.Annotations[infobloxInstanceAnnotation]
+	networkView = address.Annotations[networkViewAnnotation]
+	dnsView = address.Annotations[dnsViewAnnotation]
+	if instanceName != "" && networkView != "" && dnsView != "" {
+		return instanceName, networkView, dnsView, nil
+	}
+
+	// fallback to the pools info, which is what was used before the annotations were added. The pool may be gone though.
+	if h.ibclient == nil || h.pool == nil || h.pool.Spec.NetworkView == "" {
+		return "", "", "", fmt.Errorf(
+			"cannot determine the Infoblox views this address was allocated from: it predates the annotations "+
+				"recording them, and pool %q is gone or no longer describes an allocation. Restore it to let deletion proceed",
+			h.claim.Spec.PoolRef.Name)
+	}
+
+	return h.pool.Spec.InstanceRef.Name,
+		h.pool.Spec.NetworkView,
+		determineDNSView(h.pool.Spec.DNSView, h.ibclient.GetHostConfig().DefaultDNSView, h.pool.Spec.NetworkView),
+		nil
+}
+
+// releaseFailed records on the claim why its address could not be released. The claim keeps its
+// finalizer: a reservation that cannot be released must not be dropped silently.
+func (h *InfobloxClaimHandler) releaseFailed(err error) error {
+	conditions.Set(h.claim, metav1.Condition{
+		Type:    clusterv1.ReadyCondition,
+		Status:  metav1.ConditionFalse,
+		Reason:  v1alpha1.ReleaseFailedReason,
+		Message: err.Error(),
+	})
+	return err
 }
 
 // GetPool returns local pool.
