@@ -292,15 +292,50 @@ var _ = Describe("InfobloxIPPoolReconciler", func() {
 	})
 
 	When("the network view cannot be looked up", func() {
-		It("should set the pool to not ready", func() {
+		It("should set the pool to not ready and return an error", func() {
 			poolMock.EXPECT().GetHostConfig().Times(0)
-			poolMock.EXPECT().CheckNetworkViewExists("test-view").Return(false, errors.New("infoblox is unreachable")).Times(1)
+			poolMock.EXPECT().CheckNetworkViewExists("test-view").Return(false, errors.New("infoblox said no")).Times(1)
 			createPool()
 
 			_, err := reconcileValidatedPool()
 
-			Expect(err).NotTo(HaveOccurred())
-			Expect(getPool()).To(haveReadyCondition(metav1.ConditionFalse, v1alpha1.NetworkViewNotFoundReason))
+			// A failed lookup says nothing about whether the view exists, so it must not be
+			// reported as NetworkViewNotFound, and it has to be retried.
+			Expect(err).To(MatchError(ContainSubstring("infoblox said no")))
+			Expect(getPool()).To(haveReadyCondition(metav1.ConditionFalse, v1alpha1.InfobloxCheckFailedReason))
+			Expect(getPool().Status.Conditions[0].Message).To(ContainSubstring(`could not check network view "test-view"`))
+		})
+	})
+
+	When("the DNS view cannot be looked up", func() {
+		It("should set the pool to not ready and return an error", func() {
+			pool.Spec.DNSView = dnsViewName
+			poolMock.EXPECT().GetHostConfig().Return(&infoblox.HostConfig{}).Times(1)
+			poolMock.EXPECT().CheckNetworkViewExists("test-view").Return(true, nil).Times(1)
+			poolMock.EXPECT().CheckDNSViewExists(dnsViewName).Return(false, errors.New("infoblox said no")).Times(1)
+			poolMock.EXPECT().CheckNetworkExists(gomock.Any(), gomock.Any()).Times(0)
+			createPool()
+
+			_, err := reconcileValidatedPool()
+
+			Expect(err).To(MatchError(ContainSubstring("infoblox said no")))
+			Expect(getPool()).To(haveReadyCondition(metav1.ConditionFalse, v1alpha1.InfobloxCheckFailedReason))
+		})
+	})
+
+	When("a network of the pool cannot be looked up", func() {
+		It("should set the pool to not ready and return an error", func() {
+			poolMock.EXPECT().GetHostConfig().Return(&infoblox.HostConfig{}).Times(1)
+			poolMock.EXPECT().CheckNetworkViewExists("test-view").Return(true, nil).Times(1)
+			poolMock.EXPECT().CheckDNSViewExists("default.test-view").Return(true, nil).Times(1)
+			poolMock.EXPECT().CheckNetworkExists("test-view", netip.MustParsePrefix("10.0.0.0/24")).
+				Return(false, errors.New("infoblox said no")).Times(1)
+			createPool()
+
+			_, err := reconcileValidatedPool()
+
+			Expect(err).To(MatchError(ContainSubstring("infoblox said no")))
+			Expect(getPool()).To(haveReadyCondition(metav1.ConditionFalse, v1alpha1.InfobloxCheckFailedReason))
 		})
 	})
 

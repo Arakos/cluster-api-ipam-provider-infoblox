@@ -122,8 +122,6 @@ func (r *InfobloxIPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 func (r *InfobloxIPPoolReconciler) reconcile(ctx context.Context, pool *v1alpha1.InfobloxIPPool) error {
-	logger := log.FromContext(ctx)
-
 	ibclient, err := GetInfobloxClientForInstance(ctx, r.Client, pool.Spec.InstanceRef.Name, r.OperatorNamespace, r.GetInfobloxClientFunc)
 	if err != nil {
 		conditions.Set(pool, metav1.Condition{
@@ -139,30 +137,17 @@ func (r *InfobloxIPPoolReconciler) reconcile(ctx context.Context, pool *v1alpha1
 		pool.Spec.NetworkView = ibclient.GetHostConfig().DefaultNetworkView
 	}
 
-	// TODO: handle this in a better way
 	if ok, err := ibclient.CheckNetworkViewExists(pool.Spec.NetworkView); err != nil || !ok {
-		logger.Error(err, "could not find network view", "networkView", pool.Spec.NetworkView)
-		conditions.Set(pool, metav1.Condition{
-			Type:    clusterv1.ReadyCondition,
-			Status:  metav1.ConditionFalse,
-			Reason:  v1alpha1.NetworkViewNotFoundReason,
-			Message: fmt.Sprintf("could not find network view %q", pool.Spec.NetworkView),
-		})
-		return nil
+		return markFailedInfobloxRequest(pool, err, v1alpha1.NetworkViewNotFoundReason,
+			fmt.Sprintf("network view %q", pool.Spec.NetworkView))
 	}
 
 	// Check DNS view if specified
 	dnsView := determineDNSView(pool.Spec.DNSView, ibclient.GetHostConfig().DefaultDNSView, pool.Spec.NetworkView)
 	if dnsView != "" {
 		if ok, err := ibclient.CheckDNSViewExists(dnsView); err != nil || !ok {
-			logger.Error(err, "could not find DNS view", "dnsView", dnsView)
-			conditions.Set(pool, metav1.Condition{
-				Type:    clusterv1.ReadyCondition,
-				Status:  metav1.ConditionFalse,
-				Reason:  v1alpha1.DNSViewNotFoundReason,
-				Message: fmt.Sprintf("could not find DNS view %q", dnsView),
-			})
-			return nil
+			return markFailedInfobloxRequest(pool, err, v1alpha1.DNSViewNotFoundReason,
+				fmt.Sprintf("DNS view %q", dnsView))
 		}
 	}
 
@@ -173,14 +158,8 @@ func (r *InfobloxIPPoolReconciler) reconcile(ctx context.Context, pool *v1alpha1
 			return fmt.Errorf("failed to parse subnet: %w", err)
 		}
 		if ok, err := ibclient.CheckNetworkExists(pool.Spec.NetworkView, subnet); err != nil || !ok {
-			logger.Error(err, "could not find network", "networkView", pool.Spec.NetworkView, "subnet", subnet)
-			conditions.Set(pool, metav1.Condition{
-				Type:    clusterv1.ReadyCondition,
-				Status:  metav1.ConditionFalse,
-				Reason:  v1alpha1.NetworkNotFoundReason,
-				Message: fmt.Sprintf("could not find network %q in view %q", subnet, pool.Spec.NetworkView),
-			})
-			return nil
+			return markFailedInfobloxRequest(pool, err, v1alpha1.NetworkNotFoundReason,
+				fmt.Sprintf("network %q in view %q", subnet, pool.Spec.NetworkView))
 		}
 	}
 
