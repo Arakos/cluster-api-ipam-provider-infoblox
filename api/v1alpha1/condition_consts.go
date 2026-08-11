@@ -29,6 +29,10 @@ const (
 
 	// AuthenticationFailedReason indicates that the credentials provided to Infoblox were invalid.
 	AuthenticationFailedReason = "AuthenticationFailed"
+	// InfobloxCheckFailedReason indicates that a check against the Infoblox instance could not be
+	// performed, so whether the checked object exists is unknown.
+	InfobloxCheckFailedReason = "InfobloxCheckFailed"
+
 	// NetworkViewNotFoundReason indicates that the specified network view could not be found on the Infoblox instance.
 	NetworkViewNotFoundReason = "NetworkViewNotFound"
 	// DNSViewNotFoundReason indicates that the specified DNS view could not be found on the Infoblox instance.

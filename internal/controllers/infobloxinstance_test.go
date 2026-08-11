@@ -55,19 +55,32 @@ var _ = Describe("InfobloxInstanceReconciler", func() {
 		return reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: instanceName}})
 	}
 
-	// expectCondition reconciles once and asserts on the resulting Ready condition.
-	expectCondition := func(status metav1.ConditionStatus, reason, messageSubstring string) {
-		_, err := reconcileInstance()
-		ExpectWithOffset(1, err).NotTo(HaveOccurred())
-
+	// expectReadyCondition asserts on the Ready condition the reconciliation left behind.
+	expectReadyCondition := func(status metav1.ConditionStatus, reason, messageSubstring string) {
 		obj := &v1alpha1.InfobloxInstance{}
-		ExpectWithOffset(1, apiClient.Get(ctx, client.ObjectKey{Name: instanceName}, obj)).To(Succeed())
-		ExpectWithOffset(1, obj.Status.Conditions).To(ContainElement(And(
+		ExpectWithOffset(2, apiClient.Get(ctx, client.ObjectKey{Name: instanceName}, obj)).To(Succeed())
+		ExpectWithOffset(2, obj.Status.Conditions).To(ContainElement(And(
 			HaveField("Type", BeEquivalentTo(clusterv1.ReadyCondition)),
 			HaveField("Status", BeEquivalentTo(status)),
 			HaveField("Reason", BeEquivalentTo(reason)),
 			HaveField("Message", ContainSubstring(messageSubstring)),
 		)))
+	}
+
+	// expectCondition reconciles once, expecting that to succeed, and asserts on the resulting Ready
+	// condition. A misconfigured instance is a verdict, not a fault: there is nothing to retry.
+	expectCondition := func(status metav1.ConditionStatus, reason, messageSubstring string) {
+		_, err := reconcileInstance()
+		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		expectReadyCondition(status, reason, messageSubstring)
+	}
+
+	// expectFailedCondition reconciles once, expecting that to fail, and asserts on the resulting
+	// Ready condition. The error is what gets the reconciliation retried.
+	expectFailedCondition := func(errSubstring string, reason, messageSubstring string) {
+		_, err := reconcileInstance()
+		ExpectWithOffset(1, err).To(MatchError(ContainSubstring(errSubstring)))
+		expectReadyCondition(metav1.ConditionFalse, reason, messageSubstring)
 	}
 
 	// createCredentialsSecret creates a credentials secret in the operator namespace and points the
@@ -179,15 +192,24 @@ var _ = Describe("InfobloxInstanceReconciler", func() {
 		})
 
 		It("should set the instance to not ready if the view does not exist", func() {
-			instanceMock.EXPECT().CheckNetworkViewExists("instance-view").Return(false, nil).MinTimes(1)
+			instanceMock.EXPECT().CheckNetworkViewExists("instance-view").Return(false, nil).Times(1)
 			createObj(instance)
 
 			expectCondition(metav1.ConditionFalse, v1alpha1.NetworkViewNotFoundReason,
 				`could not find default network view "instance-view"`)
 		})
 
+		It("should set the instance to not ready and return an error if the view cannot be looked up", func() {
+			instanceMock.EXPECT().CheckNetworkViewExists("instance-view").
+				Return(false, errors.New("infoblox said no")).Times(1)
+			createObj(instance)
+
+			expectFailedCondition("infoblox said no", v1alpha1.InfobloxCheckFailedReason,
+				`could not check default network view "instance-view"`)
+		})
+
 		It("should set the instance to ready if the view exists", func() {
-			instanceMock.EXPECT().CheckNetworkViewExists("instance-view").Return(true, nil).MinTimes(1)
+			instanceMock.EXPECT().CheckNetworkViewExists("instance-view").Return(true, nil).Times(1)
 			createObj(instance)
 
 			expectCondition(metav1.ConditionTrue, v1alpha1.ConfigurationValidReason,
@@ -202,15 +224,24 @@ var _ = Describe("InfobloxInstanceReconciler", func() {
 		})
 
 		It("should set the instance to not ready if the view does not exist", func() {
-			instanceMock.EXPECT().CheckDNSViewExists("instance-dns-view").Return(false, nil).MinTimes(1)
+			instanceMock.EXPECT().CheckDNSViewExists("instance-dns-view").Return(false, nil).Times(1)
 			createObj(instance)
 
 			expectCondition(metav1.ConditionFalse, v1alpha1.DNSViewNotFoundReason,
 				`could not find default DNS view "instance-dns-view"`)
 		})
 
+		It("should set the instance to not ready and return an error if the view cannot be looked up", func() {
+			instanceMock.EXPECT().CheckDNSViewExists("instance-dns-view").
+				Return(false, errors.New("infoblox said no")).Times(1)
+			createObj(instance)
+
+			expectFailedCondition("infoblox said no", v1alpha1.InfobloxCheckFailedReason,
+				`could not check default DNS view "instance-dns-view"`)
+		})
+
 		It("should set the instance to ready if the view exists", func() {
-			instanceMock.EXPECT().CheckDNSViewExists("instance-dns-view").Return(true, nil).MinTimes(1)
+			instanceMock.EXPECT().CheckDNSViewExists("instance-dns-view").Return(true, nil).Times(1)
 			createObj(instance)
 
 			expectCondition(metav1.ConditionTrue, v1alpha1.ConfigurationValidReason,

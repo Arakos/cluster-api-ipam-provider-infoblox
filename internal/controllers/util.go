@@ -7,9 +7,39 @@ import (
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// markFailedInfobloxRequest sets the `Ready` condition to the provided Setter for a failed infoblox request.
+//
+// If an error is provided the condition reason will be the generic
+// `InfobloxCheckFailedReason` and the error will be wrapped with the `subject` and returned.
+//
+// If no error is provided the condition will be set to the provided
+// `notFoundReason` instead and no error (nil) will be returned.
+func markFailedInfobloxRequest(obj conditions.Setter, err error, notFoundReason, subject string) error {
+	if err != nil {
+		conditions.Set(obj, metav1.Condition{
+			Type:    clusterv1.ReadyCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  v1alpha1.InfobloxCheckFailedReason,
+			Message: fmt.Sprintf("could not check %s: %v", subject, err),
+		})
+		return fmt.Errorf("failed to check %s: %w", subject, err)
+	}
+
+	conditions.Set(obj, metav1.Condition{
+		Type:    clusterv1.ReadyCondition,
+		Status:  metav1.ConditionFalse,
+		Reason:  notFoundReason,
+		Message: fmt.Sprintf("could not find %s", subject),
+	})
+	return nil
+}
 
 // GetInfobloxClientForInstance returns an Infoblox client for the named InfobloxInstance, built
 // from the credentials secret the instance references in the given namespace.
