@@ -24,22 +24,14 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	gomegatypes "github.com/onsi/gomega/types"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
-	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/hostname"
-	hostnamemock "github.com/telekom/cluster-api-ipam-provider-infoblox/internal/hostname/mock"
-	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/index"
-	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox"
-	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox/ibmock"
-	"go.uber.org/mock/gomock"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/cluster-api-ipam-provider-in-cluster/pkg/ipamutil"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ipamv1 "sigs.k8s.io/cluster-api/api/ipam/v1beta2"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest/komega"
@@ -49,46 +41,32 @@ import (
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
+//
+// The suite deliberately provides infrastructure only: an API server, a scheme, and two clients.
+// No controller runs here and no mock is set up here. Every spec builds the reconciler it exercises
+// with its own dependencies and calls Reconcile directly, which keeps the setup a spec needs
+// visible in the spec itself.
 
 var (
-	cfg       *rest.Config
-	k8sClient client.Client
-	testEnv   *envtest.Environment
-	ctx       context.Context
-	cancelCtx func()
+	cfg     *rest.Config
+	testEnv *envtest.Environment
+	ctx     context.Context
+	cancel  context.CancelFunc
 
-	mockInfobloxClient          *ibmock.MockClient
-	localInfobloxClientMock     *ibmock.MockClient
-	mockHostnameHandler         *hostnamemock.MockResolver
-	mockGetInfobloxClientFunc   infoblox.GetClientFunc
-	mockNewHostnameResolverFunc func(c client.Client, claim *ipamv1.IPAddressClaim) (hostname.Resolver, error)
-	mockCtrl                    *gomock.Controller
+	// apiClient talks straight to the API server. Use it for arranging fixtures and for assertions.
+	apiClient client.Client
 )
 
-func TestAPIs(t *testing.T) {
+func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
-	mockCtrl = gomock.NewController(t)
 	RunSpecs(t, "Controller Suite")
 }
 
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
-	ctx, cancelCtx = context.WithCancel(ctrl.SetupSignalHandler())
-	// add logger to context
+	ctx, cancel = context.WithCancel(context.Background())
 	ctx = logf.IntoContext(ctx, logf.Log)
-
-	mockInfobloxClient = ibmock.NewMockClient(mockCtrl)
-	mockGetInfobloxClientFunc = func(_, _ string, _ types.UID, _ string, _ infoblox.Config) (infoblox.Client, error) {
-		return mockInfobloxClient, nil
-	}
-
-	mockHostnameHandler = hostnamemock.NewMockResolver(mockCtrl)
-	mockNewHostnameResolverFunc = func(_ client.Client, _ *ipamv1.IPAddressClaim) (hostname.Resolver, error) {
-		return mockHostnameHandler, nil
-	}
-	mockHostnameHandler.EXPECT().GetHostname(gomock.Any(), gomock.Any()).Return("hostname", nil).AnyTimes()
-	newHostnameHandlerFunc = mockNewHostnameResolverFunc
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
@@ -96,9 +74,8 @@ var _ = BeforeSuite(func() {
 			filepath.Join("..", "..", "config", "crd", "bases"),
 			filepath.Join("..", "..", "config", "crd", "test"),
 		},
-		ErrorIfCRDPathMissing:    true,
-		ControlPlaneStopTimeout:  60 * time.Second,
-		AttachControlPlaneOutput: true,
+		ErrorIfCRDPathMissing:   true,
+		ControlPlaneStopTimeout: 60 * time.Second,
 	}
 
 	var err error
@@ -112,52 +89,36 @@ var _ = BeforeSuite(func() {
 
 	//+kubebuilder:scaffold:scheme
 
-	syncDur := 100 * time.Millisecond
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme.Scheme,
-		Cache:  cache.Options{SyncPeriod: &syncDur},
-	})
-	Expect(err).ToNot(HaveOccurred())
+	apiClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	Expect(err).NotTo(HaveOccurred())
 
-	k8sClient = mgr.GetClient()
-	komega.SetClient(mgr.GetClient())
-
-	Expect(index.SetupIndexes(ctx, mgr)).To(Succeed())
-
-	Expect(
-		(&InfobloxInstanceReconciler{
-			Client:                mgr.GetClient(),
-			Scheme:                mgr.GetScheme(),
-			GetInfobloxClientFunc: mockGetInfobloxClientFunc,
-		}).SetupWithManager(ctx, mgr),
-	).To(Succeed())
-
-	Expect(
-		(&ipamutil.ClaimReconciler{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-			Adapter: &InfobloxProviderAdapter{
-				GetInfobloxClientFunc: mockGetInfobloxClientFunc,
-			},
-		}).SetupWithManager(ctx, mgr),
-	).To(Succeed())
-
-	go func() {
-		defer GinkgoRecover()
-		err = mgr.Start(ctx)
-		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
-	}()
-
+	// komega's Object/Get read through the live client, so assertions never observe a stale cache.
+	komega.SetClient(apiClient)
+	komega.SetContext(ctx)
 })
 
 var _ = AfterSuite(func() {
-	cancelCtx()
+	cancel()
 	By("tearing down the test environment")
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
-	newHostnameHandlerFunc = getHostnameResolver
+	Expect(testEnv.Stop()).To(Succeed())
 })
 
+// createNamespace creates a namespace with a generated name, isolating a spec from the objects of
+// every other spec.
+func createNamespace() string {
+	namespaceObj := corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{GenerateName: "test-ns-"},
+	}
+	ExpectWithOffset(1, apiClient.Create(ctx, &namespaceObj)).To(Succeed())
+	return namespaceObj.Name
+}
+
+// createObj creates an object on the API server.
+func createObj(obj client.Object) {
+	ExpectWithOffset(1, apiClient.Create(ctx, obj)).To(Succeed())
+}
+
+// newClaim builds an IPAddressClaim referencing the given pool.
 func newClaim(name, namespace, poolKind, poolName string) ipamv1.IPAddressClaim {
 	return ipamv1.IPAddressClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -172,4 +133,13 @@ func newClaim(name, namespace, poolKind, poolName string) ipamv1.IPAddressClaim 
 			},
 		},
 	}
+}
+
+// haveReadyCondition matches an object whose Ready condition has the given status and reason.
+func haveReadyCondition(status metav1.ConditionStatus, reason string) gomegatypes.GomegaMatcher {
+	return HaveField("Status.Conditions", ContainElement(And(
+		HaveField("Type", BeEquivalentTo(clusterv1.ReadyCondition)),
+		HaveField("Status", BeEquivalentTo(status)),
+		HaveField("Reason", BeEquivalentTo(reason)),
+	)))
 }

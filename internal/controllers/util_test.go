@@ -84,7 +84,7 @@ func TestGetInfobloxClientForInstancePassesIdentityVersionsAndConfig(t *testing.
 		gotSecretVersion   string
 		gotConfig          infoblox.Config
 	)
-	_, err = getInfobloxClientForInstance(context.Background(), k8sClient, instance.Name, secret.Namespace,
+	_, err = GetInfobloxClientForInstance(context.Background(), k8sClient, instance.Name, secret.Namespace,
 		func(instanceName, instanceResourceVersion string, secretUID types.UID, secretResourceVersion string, config infoblox.Config) (infoblox.Client, error) {
 			gotInstanceName = instanceName
 			gotInstanceVersion = instanceResourceVersion

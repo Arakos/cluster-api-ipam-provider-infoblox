@@ -64,17 +64,22 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# Extra flags passed to `go test`. Override to customize, e.g.:
+#   make test TEST_ARGS="-shuffle=1234567890"   # replay a specific shuffle seed
+#   make test TEST_ARGS=""                       # disable race detector and shuffling
+TEST_ARGS ?= -race -shuffle=on
+
 .PHONY: test-infoblox
 test-infoblox: manifests generate fmt vet envtest ## Run infoblox instance tests - instance is required to be configured.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $(shell go list ./... | grep /infoblox) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $(shell go list ./... | grep /infoblox) $(TEST_ARGS) -coverprofile cover.out
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run default tests (all but infoblox instance specific).
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $(shell go list ./... | grep -v /infoblox) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $(shell go list ./... | grep -v /infoblox) $(TEST_ARGS) -coverprofile cover.out
 
 .PHONY: test-all
 test-all: manifests generate fmt vet envtest ## Run all tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... $(TEST_ARGS) -coverprofile cover.out
 
 ##@ Build
 

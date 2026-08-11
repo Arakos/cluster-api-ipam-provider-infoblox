@@ -124,7 +124,7 @@ func (r *InfobloxIPPoolReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 func (r *InfobloxIPPoolReconciler) reconcile(ctx context.Context, pool *v1alpha1.InfobloxIPPool) error {
 	logger := log.FromContext(ctx)
 
-	ibclient, err := getInfobloxClientForInstance(ctx, r.Client, pool.Spec.InstanceRef.Name, r.OperatorNamespace, r.GetInfobloxClientFunc)
+	ibclient, err := GetInfobloxClientForInstance(ctx, r.Client, pool.Spec.InstanceRef.Name, r.OperatorNamespace, r.GetInfobloxClientFunc)
 	if err != nil {
 		conditions.Set(pool, metav1.Condition{
 			Type:    clusterv1.ReadyCondition,

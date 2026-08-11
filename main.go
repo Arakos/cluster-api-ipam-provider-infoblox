@@ -148,7 +148,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = index.SetupIndexes(ctx, mgr); err != nil {
+	if err = index.SetupIndexes(ctx, mgr.GetFieldIndexer()); err != nil {
 		setupLog.Error(err, "failed to setup indexes")
 		os.Exit(1)
 	}
@@ -161,9 +161,11 @@ func main() {
 		Scheme:           mgr.GetScheme(),
 		WatchFilterValue: watchFilter,
 		Adapter: &controllers.InfobloxProviderAdapter{
-			GetInfobloxClientFunc:   infobloxClientCache.Get,
-			OperatorNamespace:       podNamespace,
-			MaxConcurrentReconciles: maxConcurrentReconciles,
+			OperatorNamespace:                podNamespace,
+			MaxConcurrentReconciles:          maxConcurrentReconciles,
+			GetInfobloxClientFunc:            infobloxClientCache.Get,
+			GetInfobloxClientForInstanceFunc: controllers.GetInfobloxClientForInstance,
+			NewHostnameResolverFunc:          controllers.NewHostnameResolver,
 		},
 	}).SetupWithManager(ctx, mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "IPAddressClaim")

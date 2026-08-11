@@ -42,29 +42,39 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-var (
-	getInfobloxClientForInstanceFunc = getInfobloxClientForInstance
-	newHostnameHandlerFunc           = getHostnameResolver
-	hostnameAnnotation               = "ipam.cluster.x-k8s.io/hostname"
-)
+const hostnameAnnotation = "ipam.cluster.x-k8s.io/hostname"
+
+// GetInfobloxClientForInstanceFn resolves the Infoblox client for the instance a pool refers to.
+type GetInfobloxClientForInstanceFn func(ctx context.Context, c client.Reader, instanceName, operatorNamespace string, getClient infoblox.GetClientFunc) (infoblox.Client, error)
+
+// NewHostnameResolverFn builds the resolver used to derive a hostname for a claim.
+type NewHostnameResolverFn func(c client.Client, claim *ipamv1.IPAddressClaim) (hostname.Resolver, error)
 
 // InfobloxProviderAdapter reconciles a InfobloxIPPool object.
 type InfobloxProviderAdapter struct {
 	GetInfobloxClientFunc   infoblox.GetClientFunc
 	OperatorNamespace       string
 	MaxConcurrentReconciles int
+
+	// GetInfobloxClientForInstanceFunc resolves the Infoblox client for the instance a pool refers to.
+	GetInfobloxClientForInstanceFunc GetInfobloxClientForInstanceFn
+	// NewHostnameResolverFunc builds the hostname resolver for a claim.
+	NewHostnameResolverFunc NewHostnameResolverFn
 }
 
 var _ ipamutil.ProviderAdapter = &InfobloxProviderAdapter{}
 
 // InfobloxClaimHandler handles infoblox claims.
 type InfobloxClaimHandler struct {
-	Client                client.Client
-	claim                 *ipamv1.IPAddressClaim
-	pool                  *v1alpha1.InfobloxIPPool
-	getInfobloxClientFunc infoblox.GetClientFunc
-	operatorNamespace     string
-	ibclient              infoblox.Client
+	Client            client.Client
+	claim             *ipamv1.IPAddressClaim
+	pool              *v1alpha1.InfobloxIPPool
+	operatorNamespace string
+	ibclient          infoblox.Client
+
+	getInfobloxClientFunc        infoblox.GetClientFunc
+	getInfobloxClientForInstance GetInfobloxClientForInstanceFn
+	newHostnameResolver          NewHostnameResolverFn
 }
 
 var _ ipamutil.ClaimHandler = &InfobloxClaimHandler{}
@@ -93,10 +103,12 @@ func (r *InfobloxProviderAdapter) SetupWithManager(_ context.Context, b *ctrl.Bu
 // ClaimHandlerFor returns handler for claim.
 func (r *InfobloxProviderAdapter) ClaimHandlerFor(cl client.Client, claim *ipamv1.IPAddressClaim) ipamutil.ClaimHandler {
 	return &InfobloxClaimHandler{
-		Client:                cl,
-		claim:                 claim,
-		getInfobloxClientFunc: r.GetInfobloxClientFunc,
-		operatorNamespace:     r.OperatorNamespace,
+		Client:                       cl,
+		claim:                        claim,
+		getInfobloxClientFunc:        r.GetInfobloxClientFunc,
+		operatorNamespace:            r.OperatorNamespace,
+		getInfobloxClientForInstance: r.GetInfobloxClientForInstanceFunc,
+		newHostnameResolver:          r.NewHostnameResolverFunc,
 	}
 }
 
@@ -134,7 +146,7 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, 
 		return h.pool, nil, fmt.Errorf("pool not ready")
 	}
 
-	h.ibclient, err = getInfobloxClientForInstanceFunc(ctx, h.Client, h.pool.Spec.InstanceRef.Name, h.operatorNamespace, h.getInfobloxClientFunc)
+	h.ibclient, err = h.getInfobloxClientForInstance(ctx, h.Client, h.pool.Spec.InstanceRef.Name, h.operatorNamespace, h.getInfobloxClientFunc)
 	if err != nil {
 		return h.pool, nil, fmt.Errorf("failed to get infoblox client: %w", err)
 	}
@@ -279,7 +291,7 @@ func (h *InfobloxClaimHandler) getHostname(ctx context.Context) (string, error) 
 		return h.claim.Name, nil
 	}
 
-	hostnameHandler, err := newHostnameHandlerFunc(h.Client, h.claim)
+	hostnameHandler, err := h.newHostnameResolver(h.Client, h.claim)
 	if err != nil {
 		return "", fmt.Errorf("failed to create hostname handler: %w", err)
 	}
@@ -296,7 +308,9 @@ func (h *InfobloxClaimHandler) getHostname(ctx context.Context) (string, error) 
 	return hostName, nil
 }
 
-func getHostnameResolver(cl client.Client, _ *ipamv1.IPAddressClaim) (hostname.Resolver, error) {
+// NewHostnameResolver returns the resolver used to derive a hostname for a claim, which searches
+// the claim's owner references for the Machine it belongs to.
+func NewHostnameResolver(cl client.Client, _ *ipamv1.IPAddressClaim) (hostname.Resolver, error) {
 	return &hostname.SearchOwnerReferenceResolver{
 		Client:    cl,
 		SearchFor: metav1.GroupKind{Group: "cluster.x-k8s.io", Kind: "Machine"},

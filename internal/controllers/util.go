@@ -11,7 +11,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func getInfobloxClientForInstance(ctx context.Context, client client.Reader, name, secretNamespace string, getClientFunc infoblox.GetClientFunc) (infoblox.Client, error) {
+// GetInfobloxClientForInstance returns an Infoblox client for the named InfobloxInstance, built
+// from the credentials secret the instance references in the given namespace.
+func GetInfobloxClientForInstance(ctx context.Context, client client.Reader, name, secretNamespace string, getClientFunc infoblox.GetClientFunc) (infoblox.Client, error) {
 	instance := &v1alpha1.InfobloxInstance{}
 	if err := client.Get(ctx, types.NamespacedName{Name: name}, instance); err != nil {
 		return nil, fmt.Errorf("failed to fetch instance: %w", err)

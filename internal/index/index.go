@@ -23,7 +23,6 @@ import (
 
 	ipamv1 "sigs.k8s.io/cluster-api/api/ipam/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 const (
@@ -34,9 +33,9 @@ const (
 	IPAddressClaimPoolRefCombinedField = "index.poolRef"
 )
 
-// SetupIndexes adds indexes to the cache of a Manager.
-func SetupIndexes(ctx context.Context, mgr manager.Manager) error {
-	err := mgr.GetCache().IndexField(ctx, &ipamv1.IPAddress{},
+// SetupIndexes adds the indexes to the provided field indexer.
+func SetupIndexes(ctx context.Context, indexer client.FieldIndexer) error {
+	err := indexer.IndexField(ctx, &ipamv1.IPAddress{},
 		IPAddressPoolRefCombinedField,
 		IPAddressByCombinedPoolRef,
 	)
@@ -44,7 +43,7 @@ func SetupIndexes(ctx context.Context, mgr manager.Manager) error {
 		return err
 	}
 
-	return mgr.GetCache().IndexField(ctx, &ipamv1.IPAddressClaim{},
+	return indexer.IndexField(ctx, &ipamv1.IPAddressClaim{},
 		IPAddressClaimPoolRefCombinedField,
 		ipAddressClaimByCombinedPoolRef,
 	)
