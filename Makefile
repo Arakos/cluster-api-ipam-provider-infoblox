@@ -10,6 +10,9 @@ CONTROLLER_GEN_VERSION ?= $(shell sed -n 's/.*sigs.k8s.io\/controller-tools \(.*
 KUSTOMIZE_VERSION ?= v4.5.7
 ENVTEST_VERSION ?= $(shell sed -n 's/.*sigs.k8s.io\/controller-runtime\/tools\/setup-envtest \(.*\)/\1/p' go.mod)
 GO_LICENSES_VERSION ?= v1.6.0
+# CI pins golangci-lint in its workflow, so read the version from there. `make lint` then runs the
+# same version as the pull request check.
+GOLANGCI_LINT_VERSION ?= $(shell sed -n 's/^ *version: \(v[0-9][^ ]*\)/\1/p' .github/workflows/pullrequests.yaml)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -63,6 +66,14 @@ fmt: ## Run go fmt against code.
 .PHONY: vet
 vet: ## Run go vet against code.
 	go vet ./...
+
+.PHONY: lint
+lint: golangci-lint ## Run golangci-lint, the same linters CI runs.
+	$(GOLANGCI_LINT) run ./...
+
+.PHONY: lint-fix
+lint-fix: golangci-lint ## Run golangci-lint and apply the fixes it can make itself.
+	$(GOLANGCI_LINT) run --fix ./...
 
 # Extra flags passed to `go test`. Override to customize, e.g.:
 #   make test TEST_ARGS="-shuffle=1234567890"   # replay a specific shuffle seed
@@ -209,6 +220,12 @@ GO_LICENSES = $(HACK_BIN)/go-licenses
 go-licenses: $(GO_LICENSES) ## Download go-licenses locally if necessary.
 $(GO_LICENSES): $(HACK_BIN)
 	$(call go-install-tool,$(GO_LICENSES),github.com/google/go-licenses,$(GO_LICENSES_VERSION))
+
+GOLANGCI_LINT = $(HACK_BIN)/golangci-lint
+.PHONY: golangci-lint
+golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
+$(GOLANGCI_LINT): $(HACK_BIN)
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 $(HACK_BIN):
 	mkdir -p $(HACK_BIN)
