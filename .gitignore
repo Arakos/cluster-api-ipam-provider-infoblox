@@ -23,6 +23,10 @@ bin/
 *.swo
 *~
 
+# Go files
+go.work
+go.work.sum
+
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
 
