@@ -32,12 +32,14 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-api-ipam-provider-in-cluster/pkg/ipamutil"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ipamv1 "sigs.k8s.io/cluster-api/api/ipam/v1beta2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
 )
 
@@ -921,5 +923,22 @@ var _ = Describe("IPAddressClaimReconciler", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "expected the claim to be gone, got %v", err)
 			expectNoAddress()
 		})
+	})
+
+	It("returns no requests when listing claims by pool index fails", func() {
+		pool := &v1alpha1.InfobloxIPPool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pool",
+				Namespace: "default",
+			},
+		}
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme.Scheme).
+			Build()
+		adapter := &InfobloxProviderAdapter{Client: fakeClient}
+
+		requests := adapter.infobloxIPPoolToIPClaims(context.Background(), pool)
+
+		Expect(requests).To(BeEmpty())
 	})
 })
