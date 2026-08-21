@@ -25,6 +25,7 @@ import (
 
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/api/v1alpha1"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/hostname"
+	"github.com/telekom/cluster-api-ipam-provider-infoblox/internal/index"
 	"github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/infoblox"
 	ipampredicates "github.com/telekom/cluster-api-ipam-provider-infoblox/pkg/predicates"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -34,12 +35,15 @@ import (
 	"sigs.k8s.io/cluster-api-ipam-provider-in-cluster/pkg/ipamutil"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	ipamv1 "sigs.k8s.io/cluster-api/api/ipam/v1beta2"
+	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -60,6 +64,7 @@ type InfobloxProviderAdapter struct {
 	GetInfobloxClientFunc   infoblox.GetClientFunc
 	OperatorNamespace       string
 	MaxConcurrentReconciles int
+	Client                  client.Client
 
 	// GetInfobloxClientForInstanceFunc resolves the Infoblox client for the instance a pool refers to.
 	GetInfobloxClientForInstanceFunc GetInfobloxClientForInstanceFn
@@ -96,6 +101,10 @@ func (r *InfobloxProviderAdapter) SetupWithManager(_ context.Context, b *ctrl.Bu
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.MaxConcurrentReconciles,
 		}).
+		Watches(
+			&v1alpha1.InfobloxIPPool{},
+			handler.EnqueueRequestsFromMapFunc(r.infobloxIPPoolToIPClaims),
+		).
 		Owns(&ipamv1.IPAddress{}, builder.WithPredicates(
 			ipampredicates.AddressReferencesPoolKind(metav1.GroupKind{
 				Group: v1alpha1.GroupVersion.Group,
@@ -103,6 +112,46 @@ func (r *InfobloxProviderAdapter) SetupWithManager(_ context.Context, b *ctrl.Bu
 			}),
 		))
 	return nil
+}
+
+func (r *InfobloxProviderAdapter) infobloxIPPoolToIPClaims(ctx context.Context, obj client.Object) []reconcile.Request {
+	if r.Client == nil {
+		return nil
+	}
+
+	pool, ok := obj.(*v1alpha1.InfobloxIPPool)
+	if !ok {
+		return nil
+	}
+
+	logger := log.FromContext(ctx)
+	claims := &ipamv1.IPAddressClaimList{}
+	err := r.Client.List(ctx, claims,
+		client.MatchingFields{
+			index.IPAddressClaimPoolRefCombinedField: index.IPPoolRefValue(ipamv1.IPPoolReference{
+				APIGroup: v1alpha1.GroupVersion.Group,
+				Kind:     "InfobloxIPPool",
+				Name:     pool.Name,
+			}),
+		},
+		client.InNamespace(pool.Namespace),
+	)
+	if err != nil {
+		logger.Error(err, "failed to list IPAddressClaims for InfobloxIPPool", "namespace", pool.Namespace, "name", pool.Name)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(claims.Items))
+	for _, claim := range claims.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      claim.Name,
+				Namespace: claim.Namespace,
+			},
+		})
+	}
+
+	return requests
 }
 
 // ClaimHandlerFor returns handler for claim.
@@ -140,6 +189,11 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, 
 	// See: https://github.com/kubernetes-sigs/controller-runtime/pull/2943#pullrequestreview-2305262466
 	h.pool.GetObjectKind().SetGroupVersionKind(v1alpha1.GroupVersion.WithKind(v1alpha1.InfobloxIPPoolKind))
 
+	if annotations.HasPaused(h.claim) && h.claim.DeletionTimestamp.IsZero() {
+		log.FromContext(ctx).Info("IPAddressClaim is paused, skipping reconciliation", "IPAddressClaim", h.claim.Name)
+		return h.pool, &ctrl.Result{}, nil
+	}
+
 	// Readiness describes whether the pool can hand out new addresses. It says nothing about
 	// whether an address already taken from it can be released. So the gate applies to allocation only.
 	//
@@ -147,13 +201,17 @@ func (h *InfobloxClaimHandler) FetchPool(ctx context.Context) (_ client.Object, 
 	// validated against Infoblox, and its network view, DNS view and subnets may not exist.
 	if h.claim.GetDeletionTimestamp().IsZero() &&
 		!conditions.IsTrue(h.pool, clusterv1.ReadyCondition) {
+		message := "the referenced pool is not ready"
+		if conditions.Get(h.pool, clusterv1.ReadyCondition) == nil {
+			message = "the referenced pool does not have a Ready condition"
+		}
 		conditions.Set(h.claim, metav1.Condition{
 			Type:    clusterv1.ReadyCondition,
 			Status:  metav1.ConditionFalse,
 			Reason:  v1alpha1.PoolNotReadyReason,
-			Message: "the referenced pool is not ready",
+			Message: message,
 		})
-		return h.pool, nil, fmt.Errorf("pool not ready")
+		return h.pool, nil, fmt.Errorf("pool not ready: %s", message)
 	}
 	return h.pool, nil, h.ensureIBClient(ctx, h.pool.Spec.InstanceRef.Name)
 }
